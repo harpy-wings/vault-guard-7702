@@ -1,68 +1,322 @@
-# vault-guard-7702
+# VaultGuard7702
 
-An enterprise-grade, highly secure Solidity implementation contract designed to transform standard Externally Owned Accounts (EOAs) into programmable, compliant smart wallets using **EIP-7702 persistent delegation**.
+An institutional-grade, EIP-7702–native execution guard and gas-sponsorship gateway that transforms standard Externally Owned Accounts (EOAs) into programmable, policy-enforceable smart wallets through **persistent delegation**—without migrating user funds to a separate contract wallet.
 
-## 🚀 Overview
+---
 
-`vault-guard-7702` provides a robust architecture for financial institutions and non-custodial digital asset platforms to inject institutional guards (such as multi-signature compliance, transaction limits, and sponsored or alternative gas mechanics) directly into traditional EOAs without requiring complex contract wallet migrations.
+## Project Overview
 
-By signing a persistent EIP-7702 delegation, a user's EOA points to this implementation, gaining immediate access to secure, meta-transaction-driven execution.
+`VaultGuard7702` is a single, auditable implementation contract designed for financial institutions, custodians, and non-custodial platforms that need to inject compliance controls, multi-party authorization, and flexible fee settlement directly into user EOAs.
 
-## 🔑 Key Mechanism: Signed Multi-Call & Flexible Gas Abstraction
+When a user signs an [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegation, their EOA's code pointer references this implementation. From that moment, the EOA can:
 
-The core execution vector of this vault relies on custom cryptographic signature verification (`signedMessage`) to abstract transaction execution and native gas requirements. 
+1. **Authorize arbitrary calls** via off-chain EIP-712 signatures rather than on-chain EOAs signing every transaction directly.
+2. **Compensate relayers in ERC-20** (USDC, EURC, tokenized deposits, etc.) instead of requiring users to hold native gas tokens.
+3. **Enforce replay protection** through per-EOA nonce tracking stored in an ERC-7201 namespaced slot that cannot collide with native EOA storage.
+4. **Bind native ETH outflow** by including an explicit `value` field in the signed payload, preventing relayers from attaching unauthorized ETH to guarded calls.
+5. **Expire stale intents** through a signed `deadline` timestamp checked on-chain before execution.
 
-Instead of executing raw EVM calls directly, the user signs a standard cryptographic message containing the complete intent of the execution pipeline. This allows completely **gas-less UX** where users can pay transaction fees using any approved ERC-20 token (e.g., USDC, EURC, or tokenized deposits).
+Relayers (or institutional broadcasters) submit signed intents to `execute`. The contract validates the deadline, verifies cryptography, consumes the nonce, performs the target call atomically, and optionally transfers a pre-agreed ERC-20 fee to `msg.sender`.
 
-### Execution Payload Structure
+---
 
-Every execution request evaluates a cryptographic signature over the following parameters:
+## The Core Architectural Challenge & Solution
 
-*   **`target`**: The recipient address of the intended transaction (e.g., a DeFi vault, payment gateway, or clearing house).
-*   **`calldata`**: The raw hex-encoded data payload to be executed at the target address.
-*   **`feeToken`**: The address of the designated ERC-20 token used to settle the execution fee.
-*   **`fee`**: The exact amount of `feeToken` dedicated to compensating the execution relayer.
-*   **`nonce`**: A monotonic transaction replay-protection counter tied to the delegated EOA.
-*   **`deadline`**: A Unix timestamp marking the strict expiration threshold of the signature.
+### Why OpenZeppelin's Static `EIP712` Base Cannot Be Used
 
-### Protocol Flow
+OpenZeppelin's standard `EIP712` contract computes and **caches** the domain separator at construction (or initialization) time:
+
+```solidity
+// Simplified OZ pattern — unsuitable for EIP-7702 delegation
+_cachedDomainSeparator = keccak256(
+    abi.encode(TYPE_HASH, _hashedName, _hashedVersion, block.chainid, address(this))
+);
 ```
-[User EOA]
-│
-│ 1. Signs Intent (Target, Calldata, FeeToken, Fee, Nonce)
-▼
-[Relayer / Message Sender]
-│
-│ 2. Broadcasts Transaction via executeSigned()
-▼
-[vault-guard-7702 (As EOA Code)]
-│
-│ 3. Verifies EIP-712 Signature & Nonce
-│ 4. Transfers fee of feeToken to msg.sender (Relayer)
-│ 5. Executes low-level atomic CALL to target with calldata
-▼
-[Target Contract / Ecosystem]
+
+At deployment, `address(this)` is the **implementation contract's address**—for example `0xImpl…`.
+
+Under **EIP-7702 persistent delegation**, the same bytecode executes in the **context of the user's EOA**. Every external call, every `address(this)` reference, and every storage read/write operates as if the implementation logic lived at the EOA address—for example `0xAlice…`.
+
+If the domain separator were cached at deployment:
+
+| Phase | `address(this)` | Cached `verifyingContract` |
+|---|---|---|
+| Implementation deploy | `0xImpl…` | `0xImpl…` |
+| Delegated execution on Alice's EOA | `0xAlice…` | still `0xImpl…` (stale) |
+
+Signature verification would compare against a domain bound to `0xImpl…` while the user signed expecting `0xAlice…`. **Every signature would fail.** Worse, if verification were accidentally loosened, a signature crafted for one delegated EOA could become replayable across others sharing the same implementation address.
+
+This is not a minor integration detail—it is a fundamental mismatch between **singleton implementation deployment** and **per-EOA execution context**.
+
+### Our Solution: Stateless / Dynamic On-the-Fly EIP-712 Domain Calculation
+
+`VaultGuard7702` **never caches** the domain separator. On every verification path it recomputes:
+
+```solidity
+keccak256(abi.encode(
+    TYPE_HASH,
+    HASHED_NAME,
+    HASHED_VERSION,
+    block.chainid,
+    address(this)   // resolves to the delegating EOA at execution time
+));
 ```
-1. **Signature Creation**: The user generates an off-chain EIP-712 signature over the execution payload.
-2. **Relay & Fee Settlement**: Any authorized relayer (`msg.sender`) submits this signature to the vault. Upon successful cryptographic verification, the contract automatically extracts the specified `fee` in `feeToken` from the user's balances and transfers it directly to the `msg.sender` to reimburse gas overhead.
-3. **Atomic Execution**: The contract utilizes low-level assembly or secure call structures to execute the `calldata` against the `target` address within the same atomic transaction block.
 
-## 🛡️ Enterprise Security Features
+Because `address(this)` is evaluated at call time under EIP-7702, `verifyingContract` in the EIP-712 domain always equals the **user's EOA address**.
 
-*   **EIP-712 Compliance**: Secure structured data hashing preventing malicious front-running and cross-domain signature replays.
-*   **Strict Nonce Tracking**: Custom sequential mapping guarding against transaction double-execution or out-of-order execution states.
-*   **Decoupled Gas Architecture**: Completely isolates end-user compliance from the immediate availability of native base-chain gas tokens ($ETH$).
+#### Security properties this enables
 
-## 🛠️ Development & Testing
+**Cross-user replay protection.** A signature authorizing `target`, `data`, `feeToken`, `feeAmount`, `nonce`, `value`, and `deadline` is cryptographically bound to exactly one EOA. Even if two users delegate to the same implementation, identical struct fields produce different EIP-712 digests because `verifyingContract` differs. Alice cannot replay Bob's signed intent and vice versa.
 
-This project is built using **Foundry**.
+**Chain isolation.** `block.chainid` is included in the domain, preventing cross-chain replay of otherwise identical payloads.
+
+**Time-bounded intents.** The signed `deadline` prevents delayed submission of stale approvals after market, policy, or session conditions have changed.
+
+**Native-value authorization.** The signed `value` field binds the exact wei amount forwarded to `target`, preventing relayers from altering ETH outflow independently of the user's signature.
+
+**Implementation agnosticism.** Users sign against their own address as verifying contract, which is the semantically correct EIP-712 model for "I, this EOA, authorize this action."
+
+**Off-chain / on-chain parity.** Wallets and relayers derive the same domain separator by supplying the user's EOA as `verifyingContract` and the known domain `name` (`VaultGuard7702`), `version` (`1`), and chain ID—matching on-chain recomputation exactly.
+
+### EIP-712 Struct Encoding Note
+
+The signed `Execute` struct includes a dynamic `bytes data` field. Per EIP-712, dynamic types are hashed before struct encoding:
+
+```
+structHash = keccak256(abi.encode(
+    EXECUTE_TYPEHASH,
+    target,
+    keccak256(data),   // not keccak256(abi.encodePacked(data)) in struct position
+    feeToken,
+    feeAmount,
+    nonce,
+    value,
+    deadline
+));
+```
+
+Off-chain signers must mirror this encoding precisely.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         User EOA (0xAlice…)                     │
+│  EIP-7702 delegation → VaultGuard7702 implementation code       │
+│  Holds ETH + ERC-20 balances natively at 0xAlice…               │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+        1. User signs EIP-712 Execute struct off-chain
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Relayer / Institution (msg.sender)           │
+│  Submits execute(..., nonce, value, deadline, sig)              │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     VaultGuard7702 logic @ 0xAlice…             │
+│  • Reject if block.timestamp > deadline                         │
+│  • Recompute domain separator (verifyingContract = 0xAlice…)    │
+│  • Verify signature recovers to 0xAlice…                        │
+│  • Consume nonce in ERC-7201 namespaced storage                 │
+│  • CALL target with data and signed value (from EOA balance)    │
+│  • safeTransfer feeToken to relayer if feeAmount > 0            │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+                        Target protocol / counterparty
+```
+
+---
+
+## Security Features
+
+### ReentrancyGuardTransient (EIP-1153 TSTORE)
+
+Reentrancy protection uses OpenZeppelin's `ReentrancyGuardTransient`, which stores the guard flag in **transient storage** (`TSTORE` / `TLOAD`) introduced by EIP-1153 rather than a persistent EOA storage slot.
+
+This matters for EIP-7702 because persistent storage on a delegated EOA is shared with anything else the EOA might store. Transient storage is scoped to the current transaction and cleared afterward, giving robust reentrancy protection without consuming permanent storage footprint or risking collision with user data.
+
+### ERC-7201 Namespaced Storage
+
+Replay-protection state (`executed[nonce]`) lives at a deterministic slot derived from the namespace:
+
+```
+walletguard7702.storage.NonceStorage.v1
+```
+
+> **Naming note:** The ERC-7201 namespace uses the lowercase `walletguard7702` prefix (historical storage identifier), while the contract and EIP-712 domain name use `VaultGuard7702`. The namespace is fixed at deployment and must not be changed without a storage migration.
+
+ERC-7201 prevents storage collision with:
+
+- Native EOA storage (nonce, balance, code delegation fields).
+- Future upgrade modules or additional delegated logic.
+- Other namespaced libraries that follow the same standard.
+
+Access is performed through `_getStorage()`, which binds a `NonceStorage` struct to the fixed slot via inline assembly.
+
+### Low-Level Revert Bubbling
+
+When the guarded `target.call` fails, the contract does not swallow the error. Inline assembly copies the callee's returndata and reverts with it verbatim:
+
+```solidity
+assembly {
+    let size := returndatasize()
+    returndatacopy(0, 0, size)
+    revert(0, size)
+}
+```
+
+Relayers, simulation tooling, and indexers therefore observe the **original revert reason** from the target contract, which is essential for production debugging and user-facing error reporting.
+
+### Additional Properties
+
+| Control | Mechanism |
+|---|---|
+| Replay protection | Single-use `nonce` mapping in namespaced storage |
+| Signature binding | EIP-712 with dynamic per-EOA domain separator |
+| Intent expiry | Signed `deadline` checked before signature and nonce validation |
+| Native value binding | Signed `value` forwarded to `target` from the EOA balance |
+| Fee settlement ordering | Target call executes before ERC-20 fee transfer |
+| Token safety | OpenZeppelin `SafeERC20` for fee transfers |
+| Validation ordering | Deadline and signature checked before nonce consumption |
+
+---
+
+## EIP-712 Domain & Types
+
+**Domain**
+
+| Field | Value |
+|---|---|
+| `name` | `VaultGuard7702` |
+| `version` | `1` |
+| `chainId` | Current chain ID |
+| `verifyingContract` | User's delegated EOA address |
+
+**Primary type: `Execute`**
+
+```solidity
+Execute(
+    address target,
+    bytes data,
+    address feeToken,
+    uint256 feeAmount,
+    uint256 nonce,
+    uint256 value,
+    uint256 deadline
+)
+```
+
+**Type hash**
+
+```
+keccak256("Execute(address target,bytes data,address feeToken,uint256 feeAmount,uint256 nonce,uint256 value,uint256 deadline)")
+```
+
+---
+
+## Contract API
+
+Both overloads share identical semantics; they differ only in signature encoding.
+
+```solidity
+function execute(
+    address target,
+    bytes calldata data,
+    address feeToken,
+    uint256 feeAmount,
+    uint256 nonce,
+    uint256 value,
+    uint256 deadline,
+    bytes calldata signature
+) external payable returns (bytes memory result);
+
+function execute(
+    address target,
+    bytes calldata data,
+    address feeToken,
+    uint256 feeAmount,
+    uint256 nonce,
+    uint256 value,
+    uint256 deadline,
+    uint8 v,
+    bytes32 r,
+    bytes32 s
+) external payable returns (bytes memory result);
+```
+
+**Errors**
+
+- `NonceAlreadyUsed(uint256 nonce)` — the supplied nonce was already consumed for this EOA.
+- `InvalidSignature()` — recovered signer is not the delegating EOA.
+- `DeadlineExpired(uint256 deadline)` — `block.timestamp` exceeds the signed deadline.
+
+**Events**
+
+- `Executed(target, data, feeToken, feeAmount, feeRecipient, nonce, result)` — emitted after successful execution and optional fee transfer.
+
+---
+
+## Repository Layout
+
+```
+src/
+├── VaultGuard7702.sol          # Core implementation
+├── interfaces/
+│   └── IVaultGuard7702.sol     # External API, errors, and events
+└── types/
+    └── NonceStorage.sol        # ERC-7201 namespaced storage struct
+test/
+└── VaultGuard7702.t.sol        # Foundry test suite
+script/
+└── VaultGuard7702.s.sol        # Deployment script
+```
+
+---
+
+## Development
+
+Built with [Foundry](https://book.getfoundry.sh/). Requires Solidity `0.8.26` and Cancun EVM features (EIP-1153 transient storage, EIP-7702 test helpers).
 
 ```bash
-# Clone the repository
-git clone [https://github.com/harpy-wings/vault-guard-7702.git](https://github.com/harpy-wings/vault-guard-7702.git)
-
 # Install dependencies
 forge install
 
-# Run the test suite (including EIP-7702 simulation tests)
+# Compile
+forge build
+
+# Run tests
 forge test
+
+# Gas snapshot
+forge snapshot
+```
+
+### Environment
+
+Copy `.env.example` to `.env` and set your Etherscan API key for contract verification:
+
+```
+ETHERSCAN_API_KEY=...
+```
+
+---
+
+## Deployment Model
+
+1. Deploy `VaultGuard7702` once as a **shared implementation**.
+2. Users sign EIP-7702 authorization tuples pointing their EOA code to the implementation.
+3. Relayers call `execute` **on the user's EOA address** (not the implementation address) with signed payloads.
+
+The implementation address is public and reusable; security is derived from per-EOA signature domains and nonce state, not from hiding the bytecode.
+
+---
+
+## License
+
+MIT

@@ -2,5 +2,21 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 99999
+via_ir = true
 
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+[fuzz]
+runs = 256
+max_test_rejects = 65536
+
+[invariant]
+runs = 256
+depth = 50
+fail_on_revert = false
+
+[etherscan]
+mainnet = { key = "${ETHERSCAN_API_KEY}" }
+sepolia = { key = "${ETHERSCAN_API_KEY}" }
