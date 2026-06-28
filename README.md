@@ -1,5 +1,7 @@
 # VaultGuard7702
 
+[![CI](https://github.com/harpy-wings/vault-guard-7702/actions/workflows/test.yml/badge.svg)](https://github.com/harpy-wings/vault-guard-7702/actions/workflows/test.yml)
+
 An institutional-grade, EIP-7702–native execution guard and gas-sponsorship gateway that transforms standard Externally Owned Accounts (EOAs) into programmable, policy-enforceable smart wallets through **persistent delegation**—without migrating user funds to a separate contract wallet.
 
 ---
@@ -146,10 +148,8 @@ This matters for EIP-7702 because persistent storage on a delegated EOA is share
 Replay-protection state (`executed[nonce]`) lives at a deterministic slot derived from the namespace:
 
 ```
-walletguard7702.storage.NonceStorage.v1
+vaultguard7702.storage.NonceStorage.v1
 ```
-
-> **Naming note:** The ERC-7201 namespace uses the lowercase `walletguard7702` prefix (historical storage identifier), while the contract and EIP-712 domain name use `VaultGuard7702`. The namespace is fixed at deployment and must not be changed without a storage migration.
 
 ERC-7201 prevents storage collision with:
 
@@ -265,6 +265,8 @@ function execute(
 ## Repository Layout
 
 ```
+.github/workflows/
+└── test.yml                    # CI: fmt, build, test, coverage
 src/
 ├── VaultGuard7702.sol          # Core implementation
 ├── interfaces/
@@ -272,48 +274,165 @@ src/
 └── types/
     └── NonceStorage.sol        # ERC-7201 namespaced storage struct
 test/
-└── VaultGuard7702.t.sol        # Foundry test suite
+└── VaultGuard7702.t.sol        # Foundry test suite (23 tests + fuzz)
 script/
 └── VaultGuard7702.s.sol        # Deployment script
+lib/
+├── forge-std/                  # Foundry standard library (submodule)
+└── openzeppelin-contracts/     # OpenZeppelin Contracts (submodule)
 ```
 
 ---
 
-## Development
+## Getting Started
 
-Built with [Foundry](https://book.getfoundry.sh/). Requires Solidity `0.8.26` and Cancun EVM features (EIP-1153 transient storage, EIP-7702 test helpers).
+### Prerequisites
+
+| Tool | Version |
+|---|---|
+| [Foundry](https://book.getfoundry.sh/getting-started/installation) | latest stable |
+| Solidity | `0.8.26` (pinned in `foundry.toml`) |
+| EVM | `cancun` (EIP-1153 transient storage, EIP-7702 test helpers) |
+
+### Clone & install
 
 ```bash
-# Install dependencies
+git clone --recursive https://github.com/harpy-wings/vault-guard-7702.git
+cd vault-guard-7702
+```
+
+If you already cloned without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+Install or update Foundry dependencies:
+
+```bash
 forge install
+```
 
-# Compile
+### Build
+
+```bash
 forge build
+```
 
-# Run tests
+### Test
+
+```bash
+# Run the full suite (23 unit/integration tests + 256 fuzz runs)
 forge test
 
-# Gas snapshot
+# Verbose output
+forge test -vvv
+
+# Match a naming pattern
+forge test --match-test test_RevertIf_
+```
+
+### Coverage
+
+```bash
+forge coverage --ir-minimum --report summary
+```
+
+The `--ir-minimum` flag is required because production builds enable `via_ir`; it avoids stack-depth issues during coverage instrumentation.
+
+### Format
+
+```bash
+# Apply formatting
+forge fmt
+
+# CI check (no writes)
+forge fmt --check
+```
+
+### Gas snapshots
+
+```bash
 forge snapshot
 ```
 
-### Environment
+---
 
-Copy `.env.example` to `.env` and set your Etherscan API key for contract verification:
+## Test Suite
 
-```
-ETHERSCAN_API_KEY=...
-```
+`test/VaultGuard7702.t.sol` provides production-grade coverage of the guard's security boundaries:
+
+| Category | Examples |
+|---|---|
+| EIP-7702 context | `vm.signAndAttachDelegation`, `vm.etch` delegation simulation |
+| EIP-712 signing | Bytes and `(v, r, s)` `execute` success paths |
+| Cross-user replay | Signature for User A rejected on User B's EOA |
+| Nonce replay | Second call with same nonce reverts `NonceAlreadyUsed` |
+| Deadline | Expired and boundary (`deadline == block.timestamp`) cases |
+| Fee settlement | ERC-20 relayer compensation and zero-fee gas sponsorship |
+| Revert bubbling | Custom errors and string reverts propagated verbatim |
+| Reentrancy | Transient guard blocks nested `execute` mid-flight |
+| Fuzz | Randomized `feeAmount`, `nonce`, `value`, and calldata |
+
+**Coverage targets (`VaultGuard7702.sol`):** 100% branches, 100% functions, ~89% lines (inline assembly blocks are not fully instrumented by Foundry's coverage tool).
 
 ---
 
-## Deployment Model
+## Continuous Integration
+
+Every push and pull request triggers [`.github/workflows/test.yml`](.github/workflows/test.yml), which runs:
+
+1. `forge fmt --check` — Solidity formatting
+2. `forge build --sizes` — compilation and contract size report
+3. `forge test -vvv` — full test suite
+4. `forge coverage --ir-minimum --report summary` — coverage summary
+
+Submodules are fetched recursively so CI matches local development.
+
+---
+
+## Deployment
+
+### Local (Foundry script)
+
+```bash
+cp .env.example .env
+# Set ETHERSCAN_API_KEY for verification (optional)
+
+forge script script/VaultGuard7702.s.sol:VaultGuard7702Script \
+  --rpc-url <RPC_URL> \
+  --private-key <DEPLOYER_PRIVATE_KEY> \
+  --broadcast
+```
+
+### Model
 
 1. Deploy `VaultGuard7702` once as a **shared implementation**.
 2. Users sign EIP-7702 authorization tuples pointing their EOA code to the implementation.
 3. Relayers call `execute` **on the user's EOA address** (not the implementation address) with signed payloads.
 
 The implementation address is public and reusable; security is derived from per-EOA signature domains and nonce state, not from hiding the bytecode.
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| [forge-std](https://github.com/foundry-rs/forge-std) | Foundry testing utilities and cheatcodes |
+| [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts) | `ReentrancyGuardTransient`, `ECDSA`, `SafeERC20` |
+
+Managed as Git submodules under `lib/` and remapped in `remappings.txt`.
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` for local deployment and Etherscan verification:
+
+```
+ETHERSCAN_API_KEY=...
+```
 
 ---
 

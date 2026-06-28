@@ -26,8 +26,9 @@ contract VaultGuard7702 is ReentrancyGuardTransient, IVaultGuard7702 {
 
     /// @dev ERC-7201 slot: `keccak256(abi.encode(uint256(keccak256("vaultguard7702.storage.NonceStorage.v1")) - 1)) & ~bytes32(uint256(0xff))`.
     /// Namespacing under `vaultguard7702` isolates replay state from the EOA's own storage layout.
-    bytes32 private constant STORAGE_LOCATION =
-        keccak256(abi.encode(uint256(keccak256("vaultguard7702.storage.NonceStorage.v1")) - 1)) & ~bytes32(uint256(0xff));
+    bytes32 private constant STORAGE_LOCATION = keccak256(
+        abi.encode(uint256(keccak256("vaultguard7702.storage.NonceStorage.v1")) - 1)
+    ) & ~bytes32(uint256(0xff));
 
     /// @dev EIP-712 `EIP712Domain` type hash per EIP-712 specification.
     bytes32 private constant TYPE_HASH =
@@ -40,8 +41,9 @@ contract VaultGuard7702 is ReentrancyGuardTransient, IVaultGuard7702 {
     bytes32 private constant HASHED_VERSION = keccak256(bytes("1"));
 
     /// @dev EIP-712 type hash for the `Execute` struct signed by the delegating EOA.
-    bytes32 private constant EXECUTE_TYPEHASH =
-        keccak256("Execute(address target,bytes data,address feeToken,uint256 feeAmount,uint256 nonce,uint256 value,uint256 deadline)");
+    bytes32 private constant EXECUTE_TYPEHASH = keccak256(
+        "Execute(address target,bytes data,address feeToken,uint256 feeAmount,uint256 nonce,uint256 value,uint256 deadline)"
+    );
 
     /**
      * @notice Deploys the VaultGuard7702 implementation contract.
@@ -223,10 +225,14 @@ contract VaultGuard7702 is ReentrancyGuardTransient, IVaultGuard7702 {
      * @param value The native ETH amount in wei authorized by the EIP-712 signature for the target call.
      * @return result The returndata returned by the successful call to `target`.
      */
-    function _execute(address target, bytes calldata data, address feeToken, uint256 feeAmount, uint256 nonce, uint256 value)
-        internal
-        returns (bytes memory)
-    {
+    function _execute(
+        address target,
+        bytes calldata data,
+        address feeToken,
+        uint256 feeAmount,
+        uint256 nonce,
+        uint256 value
+    ) internal returns (bytes memory) {
         (bool success, bytes memory result) = target.call{value: value}(data);
         if (!success) {
             // Bubble the callee revert payload verbatim: copy returndata into memory and re-revert with it.
@@ -307,16 +313,7 @@ contract VaultGuard7702 is ReentrancyGuardTransient, IVaultGuard7702 {
         bytes calldata signature
     ) internal view returns (bool isValid) {
         bytes32 structHash = keccak256(
-            abi.encode(
-                EXECUTE_TYPEHASH,
-                target,
-                keccak256(data),
-                feeToken,
-                feeAmount,
-                nonce,
-                value,
-                deadline
-            )
+            abi.encode(EXECUTE_TYPEHASH, target, keccak256(data), feeToken, feeAmount, nonce, value, deadline)
         );
 
         bytes32 hash = _hashTypedDataV4(structHash);
@@ -354,16 +351,7 @@ contract VaultGuard7702 is ReentrancyGuardTransient, IVaultGuard7702 {
         bytes32 s
     ) internal view returns (bool isValid) {
         bytes32 structHash = keccak256(
-            abi.encode(
-                EXECUTE_TYPEHASH,
-                target,
-                keccak256(data),
-                feeToken,
-                feeAmount,
-                nonce,
-                value,
-                deadline
-            )
+            abi.encode(EXECUTE_TYPEHASH, target, keccak256(data), feeToken, feeAmount, nonce, value, deadline)
         );
 
         bytes32 hash = _hashTypedDataV4(structHash);
