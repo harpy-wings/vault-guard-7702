@@ -393,21 +393,100 @@ Submodules are fetched recursively so CI matches local development.
 
 ## Deployment
 
-### Local (Foundry script)
+`VaultGuard7702` is deployed via **CREATE2** so the implementation address is deterministic across chains (same init code hash, salt, and deployer).
+
+Foundry routes `new VaultGuard7702{salt:}` through the canonical CREATE2 deployer `0x4e59b44847b379578588920cA78FbF26c0B4956C`. The script defaults to that address for prediction and for `cast create2` mining instructions.
+
+### Canonical deployment — Ethereum Mainnet
+
+The implementation is **live and verified** on Ethereum mainnet:
+
+| Field | Value |
+|---|---|
+| **Network** | Ethereum Mainnet |
+| **Address** | [`0x00000000484FB1DF9c6682ac252c103b23707c26`](https://etherscan.io/address/0x00000000484FB1DF9c6682ac252c103b23707c26#code) |
+| **Etherscan** | [Verified source](https://etherscan.io/address/0x00000000484FB1DF9c6682ac252c103b23707c26#code) |
+| **CREATE2 salt** | `0x200122f1f542c361b453b886778c2118b0b91c69bf51b645645e8168ac0a8819` |
+| **CREATE2 deployer** | `0x4e59b44847b379578588920cA78FbF26c0B4956C` (Foundry / `cast` default) |
+
+To reproduce **the same contract address on any other EVM chain**, deploy with the **exact same** init code (this repository's `VaultGuard7702` bytecode), **salt**, and **CREATE2 deployer** above. Set in `.env`:
+
+```bash
+CREATE2_SALT=0x200122f1f542c361b453b886778c2118b0b91c69bf51b645645e8168ac0a8819
+CREATE2_TARGET_ADDRESS=0x00000000484FB1DF9c6682ac252c103b23707c26
+```
+
+Verify before broadcasting:
+
+```bash
+cast create2 \
+  --salt 0x200122f1f542c361b453b886778c2118b0b91c69bf51b645645e8168ac0a8819 \
+  --init-code-hash $(forge inspect VaultGuard7702 bytecode | xargs cast keccak) \
+  --deployer 0x4e59b44847b379578588920cA78FbF26c0B4956C
+# Expected: 0x00000000484FB1DF9c6682ac252c103b23707c26
+```
+
+> **Note:** The address is only guaranteed to match if the compiled init code hash is identical to mainnet (same Solidity version, optimizer settings, and source). Use `foundry.toml` from this repo without changes.
+
+### Step 1 — Dry-run (no salt yet)
 
 ```bash
 cp .env.example .env
-# Set ETHERSCAN_API_KEY for verification (optional)
+# Optional: CREATE2_TARGET_ADDRESS=0x...  (vanity or fixed address you require)
 
-forge script script/VaultGuard7702.s.sol:VaultGuard7702Script \
-  --rpc-url <RPC_URL> \
-  --private-key <DEPLOYER_PRIVATE_KEY> \
-  --broadcast
+forge script script/VaultGuard7702.s.sol:VaultGuard7702Script -vv
 ```
 
-### Model
+If `CREATE2_SALT` is missing (or does not match `CREATE2_TARGET_ADDRESS`), the script prints `cast create2` commands and **exits without deploying**.
 
-1. Deploy `VaultGuard7702` once as a **shared implementation**.
+### Step 2 — Mine a salt with `cast`
+
+Use the init code hash and deployer printed by the script:
+
+```bash
+# Verify a candidate salt
+cast create2 \
+  --salt 0x<YOUR_SALT> \
+  --init-code-hash $(forge inspect VaultGuard7702 bytecode | xargs cast keccak) \
+  --deployer 0x4e59b44847b379578588920cA78FbF26c0B4956C
+
+# Mine toward a prefix (example)
+cast create2 \
+  --init-code-hash $(forge inspect VaultGuard7702 bytecode | xargs cast keccak) \
+  --deployer 0x4e59b44847b379578588920cA78FbF26c0B4956C \
+  --starts-with 0x000000000000000000000000
+
+# Mine toward an exact target address
+cast create2 \
+  --init-code-hash $(forge inspect VaultGuard7702 bytecode | xargs cast keccak) \
+  --deployer 0x4e59b44847b379578588920cA78FbF26c0B4956C \
+  --matching 0x<TARGET_ADDRESS>
+```
+
+Export the mined salt:
+
+```bash
+CREATE2_SALT=0x<MINED_SALT>
+```
+
+### Step 3 — Broadcast
+
+```bash
+source .env
+
+forge script script/VaultGuard7702.s.sol:VaultGuard7702Script \
+  --rpc-url "$RPC_URL" \
+  --private-key "$PRIVATE_KEY" \
+  --broadcast \
+  --verify \
+  -vvvv
+```
+
+When the predicted CREATE2 address already holds bytecode, the script logs the existing deployment and skips broadcasting.
+
+### Deployment model
+
+1. Deploy `VaultGuard7702` once as a **shared implementation** at the CREATE2 address.
 2. Users sign EIP-7702 authorization tuples pointing their EOA code to the implementation.
 3. Relayers call `execute` **on the user's EOA address** (not the implementation address) with signed payloads.
 
@@ -428,11 +507,17 @@ Managed as Git submodules under `lib/` and remapped in `remappings.txt`.
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` for local deployment and Etherscan verification:
+Copy `.env.example` to `.env`:
 
-```
-ETHERSCAN_API_KEY=...
-```
+| Variable | Purpose |
+|---|---|
+| `ETHERSCAN_API_KEY` | Contract verification on Etherscan |
+| `RPC_URL` | Mainnet (or target chain) RPC for broadcast |
+| `SRPC_URL` | Sepolia RPC (optional) |
+| `PRIVATE_KEY` | Broadcaster key for `forge script --broadcast` |
+| `CREATE2_SALT` | bytes32 hex salt (canonical mainnet: `0x200122f1f542c361b453b886778c2118b0b91c69bf51b645645e8168ac0a8819`) |
+| `CREATE2_DEPLOYER` | CREATE2 deployer override (default: `0x4e59b44847b379578588920cA78FbF26c0B4956C`) |
+| `CREATE2_TARGET_ADDRESS` | Optional required CREATE2 address (`0x00000000484FB1DF9c6682ac252c103b23707c26` on mainnet) |
 
 ---
 
